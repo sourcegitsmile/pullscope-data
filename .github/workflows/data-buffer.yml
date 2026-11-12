@@ -1,6 +1,8 @@
 # Nightly data buffer for Pullscope (dec_0017).
-# Pages serves branch main, folder / (https://sourcegitsmile.github.io/pullscope-data/).
-# The job rebuilds cards + prices, mirrors new Yu-Gi-Oh! images, then commits v1/ and img/ to main.
+# main     = the pipeline (this file, pipeline/*.py) — normal history.
+# gh-pages = the published site, recreated as ONE orphan commit each run, so daily price files and
+#            ~550 MB of images never pile up in git history. Pages serves gh-pages, folder /.
+# Each run starts from the previous site: mirrored images are reused, price history is extended.
 # No secrets: pushes with GITHUB_TOKEN (contents: write).
 name: data-buffer
 on:
@@ -15,41 +17,58 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180     # first run mirrors ~14.8k Yu-Gi-Oh! images; nightly runs take minutes
+    timeout-minutes: 330     # first run: --all-sets fetch + 75 min of image mirroring; nightly runs take minutes
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pillow==11.0.0
       - name: Restore HTTP cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: pipeline/.cache
           key: http-${{ github.run_id }}
           restore-keys: http-
-      - name: Seed mirrored images from the published site (file name = hash of source URL)
+      - name: Fetch the previous site (images + price history)
         run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git clone --depth 1 --branch gh-pages "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" prev-site
+          else
+            mkdir -p prev-site
+          fi
           mkdir -p pipeline/out/img/ygo
-          if [ -d img/yugioh ]; then cp img/yugioh/* pipeline/out/img/ygo/ 2>/dev/null || true; fi
-      - name: Build card data + prices
+          if [ -d prev-site/img/yugioh ]; then cp prev-site/img/yugioh/* pipeline/out/img/ygo/ 2>/dev/null || true; fi
+      - name: Build card data + prices + FX
         working-directory: pipeline
         run: python3 build.py --all-sets
       - name: Mirror Yu-Gi-Oh! images (YGOPRODeck forbids hotlinking), WebP 420 px
         working-directory: pipeline
-        run: python3 mirror_images.py --game ygo
-      - name: Package the CDN contract the app reads (PRD file 4 §2)
+        run: python3 mirror_images.py --game ygo --max-minutes 75
+      - name: Package the CDN contract the app reads (PRD file 4 §2) + history + trending
         working-directory: pipeline
-        run: python3 package.py --image-base "$DATA_BASE_URL"
+        run: python3 package.py --image-base "$DATA_BASE_URL" --history-in ../prev-site/v1/history
+      - name: Save HTTP cache (also when a later step fails, so the next run starts warm)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: pipeline/.cache
+          key: http-${{ github.run_id }}
       - name: Pages size guard (published site limit 1 GB)
         run: python3 check_size.py pipeline/dist --limit-mb 900
-      - name: Publish to main
+      - name: Publish to gh-pages (single orphan commit)
+        # Built inside the clone of the previous site: git then knows which blobs (images) the remote
+        # already has and uploads only the new ones.
         run: |
-          rsync -a --delete pipeline/dist/v1/ v1/
-          mkdir -p img && rsync -a --delete pipeline/dist/img/ img/
-          touch .nojekyll
+          cd prev-site
+          [ -d .git ] || git init -q -b gh-pages
           git config user.name "data-buffer bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add v1 img .nojekyll   # path-limited add also stages deletions
-          if git diff --cached --quiet; then echo "no changes"; exit 0; fi
+          git checkout -q --orphan publish
+          git rm -rq --cached -- v1 img .nojekyll 2>/dev/null || true
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R ../pipeline/dist/. .
+          touch .nojekyll
+          git add -- v1 .nojekyll
+          if [ -d img ]; then git add -- img; fi
           git commit -q -m "data: $(date -u +%F)"
-          git push
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" publish:gh-pages

@@ -1,12 +1,14 @@
 # pullscope-data
 
-Repo chỉ chứa dữ liệu cho app Pullscope (dec_0017). Hằng đêm (21:40 UTC) GitHub Actions dựng lại thẻ + giá, tải thêm ảnh YGO mới rồi commit `v1/` và `img/` vào `main`. GitHub Pages phục vụ `main`, thư mục gốc: https://sourcegitsmile.github.io/pullscope-data/ — đây là `AppConfig.dataBaseURL` của app.
+Repo chỉ chứa dữ liệu cho app Pullscope (dec_0017). Hằng đêm (21:40 UTC) GitHub Actions dựng lại thẻ + giá (12 game, Pokémon JP), tải thêm ảnh YGO mới, nối lịch sử giá, tính trending, lấy tỷ giá ECB.
+- `main` chỉ chứa pipeline.
+- Dữ liệu nằm ở nhánh `gh-pages`. Mỗi lần chạy tạo lại nhánh này thành **một commit mồ côi**, nên ảnh (~550 MB) và file giá hằng ngày không tích luỹ trong lịch sử git.
+- GitHub Pages phục vụ `gh-pages`, thư mục gốc: https://sourcegitsmile.github.io/pullscope-data/. Đây là `AppConfig.dataBaseURL` của app.
 
 ```
-.github/workflows/data-buffer.yml   cron → build → mirror ảnh YGO → package → kiểm dung lượng → commit vào main
+.github/workflows/data-buffer.yml   cron → build → mirror ảnh YGO → package → kiểm dung lượng → commit mồ côi lên gh-pages
 pipeline/                           build.py · mirror_images.py · package.py (bản gốc ở tcc/spike/cache, chép bằng sync.sh)
 check_size.py                       chặn nếu site > 900 MB (Pages giới hạn 1 GB)
-v1/  img/                           do workflow ghi, không sửa tay
 ```
 
 Site:
@@ -15,8 +17,12 @@ Site:
 v1/manifest.json
 v1/<game>/catalog-<sha>.json.gz
 v1/<game>/prices-<day>.json.gz
-img/yugioh/<sha16>.webp            chỉ Yu-Gi-Oh! (YGOPRODeck cấm hotlink); 4 game còn lại trỏ thẳng nguồn
+v1/<game>/sets.json
+v1/history/meta.json · v1/history/<game>/<productId % 1024>.json.gz
+v1/trending-<yyyy-MM-dd>.json · v1/fx-<yyyy-MM-dd>.json
+img/yugioh/<sha16>.webp            chỉ Yu-Gi-Oh! (YGOPRODeck cấm hotlink); game khác trỏ thẳng nguồn
 ```
+Định dạng chi tiết: `tcc/document/DD/P1-data.decisions.md`.
 
 Chạy tay: Actions → data-buffer → Run workflow (`gh workflow run data-buffer -R sourcegitsmile/pullscope-data`). Không có secret; push bằng `GITHUB_TOKEN`. Ảnh đã đăng được nạp lại vào `pipeline/out/img` trước mỗi lần chạy (tên file = hash URL nguồn), nên chỉ ảnh mới mới phải tải.
 

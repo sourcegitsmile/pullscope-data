@@ -49,6 +49,8 @@ def main() -> int:
     ap.add_argument("--game", action="append")
     ap.add_argument("--limit", type=int, default=0, help="max NEW downloads this run")
     ap.add_argument("--keep-original", action="store_true", help="store upstream bytes as-is")
+    ap.add_argument("--max-minutes", type=float, default=0,
+                    help="stop downloading after this long so the nightly job still publishes; the rest come next run")
     a = ap.parse_args()
 
     images: dict[str, str] = json.loads((a.out / "images.json").read_text())
@@ -57,6 +59,7 @@ def main() -> int:
     last: dict[str, float] = {}
     by_url: dict[str, str] = {}  # source URL -> rel path, filled as we go
     done = reused = failed = 0
+    deadline = time.time() + a.max_minutes * 60 if a.max_minutes else None
     for card_id, url in images.items():
         game = card_id.split(":", 1)[0]
         if a.game and game not in a.game:
@@ -71,7 +74,7 @@ def main() -> int:
                 manifest[card_id] = rel
                 reused += 1
             continue
-        if a.limit and done >= a.limit:
+        if (a.limit and done >= a.limit) or (deadline and time.time() > deadline):
             continue  # keep walking so already-mirrored printings still get mapped
         host = urllib.parse.urlparse(url).hostname or ""
         wait = max(HOST_DELAY.get(host, 0.2), 0.2) - (time.time() - last.get(host, 0))

@@ -41,9 +41,20 @@ HOST_DELAY = {  # seconds between requests, per each source's stated guidance
     "tcgcsv.com": 0.25,            # tcgcsv sample script pauses 0.25 s
     "api.tcgdex.net": 0.2,
     "optcgapi.com": 0.2,
+    "www.ecb.europa.eu": 0.5,
 }
 TCGCSV = "https://tcgcsv.com/tcgplayer"
-CATEGORY = {"mtg": 1, "ygo": 2, "pokemon": 3, "onepiece": 68, "lorcana": 71}
+CATEGORY = {"mtg": 1, "ygo": 2, "pokemon": 3, "onepiece": 68, "lorcana": 71,
+            # F20 (PRD 2.0): games with no other free card source — catalog AND prices from tcgcsv.
+            "dbsFusionWorld": 80, "dbsCardGame": 27, "digimon": 63, "gundam": 86, "unionArena": 81,
+            "riftbound": 89, "starWarsUnlimited": 79,
+            "pokemonJa": 85}  # Pokémon Japan → packaged into `pokemon` with language "ja"
+TCGCSV_ONLY = ["dbsFusionWorld", "dbsCardGame", "digimon", "gundam", "unionArena", "riftbound",
+               "starWarsUnlimited", "pokemonJa"]
+LANGUAGE = {"pokemonJa": "ja"}
+DEFAULT_GROUPS = 2  # local runs without --all-sets: newest N groups of each tcgcsv-only game
+ECB_FX = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+FX_CODES = ["USD", "JPY", "GBP", "EUR", "CAD", "AUD", "NZD", "SGD"]  # F18
 DEFAULT_SETS = {
     "pokemon": ["base1", "swsh3", "sv08"],
     "mtg": ["lea", "fdn"],
@@ -198,7 +209,8 @@ def build_pokemon(set_id, csv: TcgCsv, cache):
         pid = by_key.get((norm(c["name"]), local.lstrip("0") or "0"))
         cards.append(card("pokemon", set_id, s["name"], c["id"], c["name"], number, None,
                           f"{c['image']}/high.webp" if c.get("image") else None, "TCGdex", pid))
-    return {"id": set_id, "name": s["name"], "released": s.get("releaseDate")}, cards, group
+    logo = f"{s['logo']}.png" if s.get("logo") else None
+    return {"id": set_id, "name": s["name"], "released": s.get("releaseDate"), "logo": logo}, cards, group
 
 
 def build_mtg(set_code, csv: TcgCsv, cache):
@@ -290,8 +302,52 @@ def build_lorcana(set_code, csv: TcgCsv, cache):
     return {"id": set_code, "name": s["name"], "released": s.get("released_at")}, cards, group
 
 
+def tcgcsv_adapter(game: str):
+    """Card list straight from tcgcsv groups/products (F20 games, Pokémon JP). A product is a CARD when it
+    carries a printed "Number"; sealed product (boxes, packs, decks) has none and is skipped."""
+    def build(group_id, csv: TcgCsv, cache):
+        group = next((g for g in csv.groups(game) if str(g["groupId"]) == str(group_id)), None)
+        if not group:
+            raise RuntimeError(f"tcgcsv group {group_id} not found in category {CATEGORY[game]}")
+        set_id = (group.get("abbreviation") or str(group["groupId"])).strip()
+        if game in LANGUAGE:
+            set_id = f"{LANGUAGE[game]}-{set_id}"
+        cards = []
+        for p in csv.products(game, group["groupId"]):
+            number = ext(p, "Number")
+            if not number:
+                continue
+            rarity = ext(p, "Rarity")
+            image = (p.get("imageUrl") or "").replace("_200w.", "_400w.") or None
+            src_id = f"{LANGUAGE[game]}-{p['productId']}" if game in LANGUAGE else str(p["productId"])
+            cards.append(card(game, set_id, group["name"], src_id, p["name"], number,
+                              None if rarity in (None, "", "None") else rarity, image, "tcgcsv",
+                              p["productId"], language=LANGUAGE.get(game, "en")))
+        released = (group.get("publishedOn") or "")[:10] or None
+        return {"id": set_id, "name": group["name"], "released": released, "logo": None}, cards, group
+    return build
+
+
 ADAPTERS = {"pokemon": build_pokemon, "mtg": build_mtg, "ygo": build_ygo,
-            "onepiece": build_onepiece, "lorcana": build_lorcana}
+            "onepiece": build_onepiece, "lorcana": build_lorcana,
+            **{g: tcgcsv_adapter(g) for g in TCGCSV_ONLY}}
+
+
+def fetch_fx(cache: Path) -> dict | None:
+    """ECB euro reference rates, re-based to USD (F18). ECB allows reuse with the source named."""
+    try:
+        xml = get_text(ECB_FX)
+    except Exception as e:  # FX is optional: the app falls back to USD
+        print(f"  ! fx: {e}", file=sys.stderr)
+        return None
+    day = re.search(r"time='(\d{4}-\d{2}-\d{2})'", xml)
+    eur = {m.group(1): float(m.group(2)) for m in re.finditer(r"currency='([A-Z]{3})' rate='([0-9.]+)'", xml)}
+    eur["EUR"] = 1.0
+    if not day or "USD" not in eur:
+        return None
+    usd = eur["USD"]
+    return {"date": day.group(1), "base": "USD", "source": "European Central Bank euro foreign exchange reference rates",
+            "rates": {c: round(eur[c] / usd, 6) for c in FX_CODES if c in eur}}
 
 
 def all_set_ids(game: str, cache: Path) -> list[str]:
@@ -301,6 +357,8 @@ def all_set_ids(game: str, cache: Path) -> list[str]:
         return [s["code"] for s in get_json("https://api.scryfall.com/sets", cache)["data"] if not s.get("digital")]
     if game == "ygo":
         return sorted({s["set_name"] for s in get_json("https://db.ygoprodeck.com/api/v7/cardsets.php", cache)})
+    if game in TCGCSV_ONLY:
+        return [str(g["groupId"]) for g in get_json(f"{TCGCSV}/{CATEGORY[game]}/groups", cache)["results"]]
     if game == "onepiece":
         return [s["set_id"] for s in get_json("https://optcgapi.com/api/allSets/", cache)]
     return [s["code"] for s in get_json("https://api.lorcast.com/v0/sets", cache)["results"]]
@@ -328,7 +386,15 @@ def main() -> int:
     a.out.mkdir(parents=True, exist_ok=True)
 
     for game in games:
-        set_ids = a.sets if (a.sets and len(games) == 1) else (all_set_ids(game, a.cache) if a.all_sets else DEFAULT_SETS[game])
+        if a.sets and len(games) == 1:
+            set_ids = a.sets
+        elif a.all_sets:
+            set_ids = all_set_ids(game, a.cache)
+        elif game in TCGCSV_ONLY:  # newest groups only, for local smoke runs
+            groups = sorted(csv.groups(game), key=lambda g: g.get("publishedOn") or "", reverse=True)
+            set_ids = [str(g["groupId"]) for g in groups[:DEFAULT_GROUPS]]
+        else:
+            set_ids = DEFAULT_SETS[game]
         gdir = a.out / game
         gdir.mkdir(exist_ok=True)
         stats = {"sets": 0, "cards": 0, "with_product": 0, "with_market_price": 0, "ambiguous": 0, "failed_sets": []}
@@ -363,6 +429,9 @@ def main() -> int:
         (gdir / "index.json").write_text(json.dumps(index, ensure_ascii=False, separators=(",", ":")))
         meta["games"][game] = stats
 
+    fx = fetch_fx(a.cache)
+    if fx:
+        (a.out / "fx.json").write_text(json.dumps(fx, indent=1))
     (a.out / "images.json").write_text(json.dumps(images, separators=(",", ":")))
     (a.out / "meta.json").write_text(json.dumps(meta, indent=1))
     print(json.dumps(meta["games"], indent=1))
