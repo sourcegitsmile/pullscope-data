@@ -1,0 +1,5 @@
+pipeline/out/
+pipeline/dist/
+pipeline/.cache/
+__pycache__/
+.DS_Store
